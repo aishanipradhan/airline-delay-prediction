@@ -38,9 +38,8 @@ head(flights)
 # Columns to keep
 keep_cols <- c(
   "YEAR", "MONTH", "DAY_OF_MONTH", "DAY_OF_WEEK", "FL_DATE",
-  "OP_UNIQUE_CARRIER", "TAIL_NUM", "OP_CARRIER_FL_NUM",
-  "DEST_AIRPORT_ID", "DEST", "DEST_STATE_ABR",
-  "CRS_DEP_TIME", "CRS_ARR_TIME", "CRS_ELAPSED_TIME",
+  "OP_UNIQUE_CARRIER", "TAIL_NUM", "OP_CARRIER_FL_NUM", "DEST", "DEST_STATE_ABR",
+  "CRS_DEP_TIME",
   "DISTANCE", "DEP_DEL15"
 )
 
@@ -113,6 +112,14 @@ route_delay_rates <- flights %>%
     .groups = "drop"
   )
 
+# FIXXXX left join
+route_delay_rates <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
+  summarise(
+    carrier_route_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
+    .groups = "drop"
+  )
+
 flights <- flights %>%
   left_join(route_delay_rates,
             by = c("OP_UNIQUE_CARRIER", "DEST"))
@@ -145,12 +152,18 @@ flights <- flights %>%
 head(flights)
 ```
 
-## Logistic Regression
+## Logistic Regression - aishani 
 
-## Logistic Regression with Lasso
+## Logistic Regression with Ridge - aishani
 
-## Random Forest
+## Logistic Regression with Lasso - aishani
 
-## Boosting
+throw everything here
 
-## SVM?
+## Random Forest - avery
+
+## Boosting - avery
+
+## SVM? - avery 
+
+## Neural Nets – if everything sucks - aishani
