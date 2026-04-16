@@ -1,0 +1,156 @@
+---
+title: "Airline Delay Prediction"
+author: "Aishani Pradhan, Avery Wang"
+format: pdf
+editor: visual
+---
+
+## Reading the Data
+
+```{r}
+library(tidyverse)
+library(readr)
+```
+
+![]()
+
+```{r}
+# Read data
+flights2023 <- read_csv("data/flights2023.csv")
+flights2024 <- read_csv("data/flights2024.csv")
+
+# Combine
+flights <- bind_rows(flights2023, flights2024)
+
+# Keep only departing PIT flights if arrivals are included
+flights <- flights %>%
+  filter(ORIGIN == "PIT")
+
+```
+
+```{r}
+head(flights)
+```
+
+## Filtering
+
+```{r}
+# Columns to keep
+keep_cols <- c(
+  "YEAR", "MONTH", "DAY_OF_MONTH", "DAY_OF_WEEK", "FL_DATE",
+  "OP_UNIQUE_CARRIER", "TAIL_NUM", "OP_CARRIER_FL_NUM",
+  "DEST_AIRPORT_ID", "DEST", "DEST_STATE_ABR",
+  "CRS_DEP_TIME", "CRS_ARR_TIME", "CRS_ELAPSED_TIME",
+  "DISTANCE", "DEP_DEL15"
+)
+
+flights <- flights %>%
+  select(all_of(keep_cols))
+```
+
+## Preprocessing
+
+```{r}
+str(flights)
+```
+
+```{r}
+# Corrected data types
+
+flights <- flights %>%
+  mutate(
+    FL_DATE = parse_date_time(FL_DATE, orders = "mdY IMS p"),
+    FL_DATE = as.Date(FL_DATE),
+
+    YEAR = factor(YEAR),
+    MONTH = factor(MONTH),
+    DAY_OF_WEEK = factor(DAY_OF_WEEK),
+
+    OP_UNIQUE_CARRIER = factor(OP_UNIQUE_CARRIER),
+    DEST = factor(DEST),
+    DEST_STATE_ABR = factor(DEST_STATE_ABR),
+
+    #DEP_DEL15 = factor(DEP_DEL15)
+  )
+```
+
+```{r}
+str(flights)
+```
+
+## EDA+Feature Engineering
+
+```{r}
+flights <- flights %>%
+  mutate(
+    dep_hour = floor(CRS_DEP_TIME / 100),
+
+    time_of_day = case_when(
+      dep_hour >= 5  & dep_hour < 12 ~ "Morning",
+      dep_hour >= 12 & dep_hour < 17 ~ "Afternoon",
+      dep_hour >= 17 & dep_hour < 21 ~ "Evening",
+      TRUE ~ "Night"
+    ),
+
+    day_type = if_else(as.numeric(as.character(DAY_OF_WEEK)) %in% c(1, 7),
+                       "Weekend", "Weekday")
+  )
+
+# Airline-day delay rate using only earlier flights that day
+flights <- flights %>%
+  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_day_delay_rate = lag(cummean(DEP_DEL15), default = 0)
+  ) %>%
+  ungroup()
+
+# Historical carrier-route delay rate
+route_delay_rates <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, DEST) %>%
+  summarise(
+    carrier_route_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+flights <- flights %>%
+  left_join(route_delay_rates,
+            by = c("OP_UNIQUE_CARRIER", "DEST"))
+
+# Historical destination delay rate
+dest_delay_rates <- flights %>%
+  group_by(DEST) %>%
+  summarise(
+    dest_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+flights <- flights %>%
+  left_join(dest_delay_rates, by = "DEST")
+
+# Airline-month average delay rate
+carrier_month_rates <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
+  summarise(
+    carrier_month_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+flights <- flights %>%
+  left_join(carrier_month_rates,
+            by = c("OP_UNIQUE_CARRIER", "MONTH"))
+```
+
+```{r}
+head(flights)
+```
+
+## Logistic Regression
+
+## Logistic Regression with Lasso
+
+## Random Forest
+
+## Boosting
+
+## SVM?
