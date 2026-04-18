@@ -61,15 +61,15 @@ flights <- flights %>%
     FL_DATE = parse_date_time(FL_DATE, orders = "mdY IMS p"),
     FL_DATE = as.Date(FL_DATE),
 
-    YEAR = factor(YEAR),
-    MONTH = factor(MONTH),
-    DAY_OF_WEEK = factor(DAY_OF_WEEK),
+    YEAR = as.factor(YEAR),
+    MONTH = as.factor(MONTH),
+    DAY_OF_WEEK = as.factor(DAY_OF_WEEK),
 
-    OP_UNIQUE_CARRIER = factor(OP_UNIQUE_CARRIER),
-    DEST = factor(DEST),
-    DEST_STATE_ABR = factor(DEST_STATE_ABR),
+    OP_UNIQUE_CARRIER = as.factor(OP_UNIQUE_CARRIER),
+    DEST = as.factor(DEST),
+    DEST_STATE_ABR = as.factor(DEST_STATE_ABR),
 
-    #DEP_DEL15 = factor(DEP_DEL15)
+    #DEP_DEL15 = as.factor(DEP_DEL15)
   )
 ```
 
@@ -152,7 +152,7 @@ flights <- flights %>%
 head(flights)
 ```
 
-## Logistic Regression - aishani 
+## Logistic Regression - aishani
 
 ## Logistic Regression with Ridge - aishani
 
@@ -164,6 +164,6 @@ throw everything here
 
 ## Boosting - avery
 
-## SVM? - avery 
+## SVM? - avery
 
 ## Neural Nets – if everything sucks - aishani
