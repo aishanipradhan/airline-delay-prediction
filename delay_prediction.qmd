@@ -23,8 +23,10 @@ flights2024 <- read_csv("data/flights2024.csv")
 flights <- bind_rows(flights2023, flights2024)
 
 # Keep only departing PIT flights if arrivals are included
+# Remove flights with no delay info
 flights <- flights %>%
-  filter(ORIGIN == "PIT")
+  filter(ORIGIN == "PIT") %>%
+  filter(!is.na(DEP_DEL15))
 
 ```
 
@@ -79,7 +81,7 @@ str(flights)
 
 ## EDA+Feature Engineering
 
-```{r}
+```{r, eval = FALSE}
 flights <- flights %>%
   arrange(FL_DATE, CRS_DEP_TIME)
 
@@ -174,6 +176,57 @@ flights <- flights %>%
   ) %>%
   mutate(
     carrier_month_delay_rate = if_else(row_number() == 1, 0, carrier_month_delay_rate)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# This chunk calculates delay rates in the same groups as above, but over all of 23-24 flights
+
+# I'll keep the carrier day delay rate the same, but add a column with # of flights in the day
+flights <- flights %>%
+  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_day_delay_rate =
+      lag(cumsum(DEP_DEL15), default = 0) /
+      pmax(row_number() - 1, 1),
+    n_flights_day = n()
+  ) %>%
+  mutate(
+    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
+  ) %>%
+  ungroup()
+
+# Delay rate for all flights for carrier-destination pair
+# Do not create a # of flights column because we assume the routes are flown somewhat frequently
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
+  group_by(OP_UNIQUE_CARRIER, DEST) %>%
+  mutate(
+    carrier_route_delay_rate =
+      mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Delay rate for all flights to a given destination
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
+  group_by(DEST) %>%
+  mutate(
+    dest_delay_rate =
+      mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Historical carrier-month delay rate:
+# all previous flights in that carrier-month combination
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
+  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
+  mutate(
+    carrier_month_delay_rate =
+      mean(DEP_DEL15)
   ) %>%
   ungroup()
 ```
