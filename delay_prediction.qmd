@@ -201,7 +201,6 @@ flights <- flights %>%
 # Delay rate for all flights for carrier-destination pair
 # Do not create a # of flights column because we assume the routes are flown somewhat frequently
 flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(OP_UNIQUE_CARRIER, DEST) %>%
   mutate(
     carrier_route_delay_rate =
@@ -211,7 +210,6 @@ flights <- flights %>%
 
 # Delay rate for all flights to a given destination
 flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(DEST) %>%
   mutate(
     dest_delay_rate =
@@ -219,13 +217,20 @@ flights <- flights %>%
   ) %>%
   ungroup()
 
-# Historical carrier-month delay rate:
-# all previous flights in that carrier-month combination
+# Delay rate for all carrier flights in the same month to capture seasonality
 flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(OP_UNIQUE_CARRIER, MONTH) %>%
   mutate(
     carrier_month_delay_rate =
+      mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Delay rate for all carrier flights
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_delay_rate =
       mean(DEP_DEL15)
   ) %>%
   ungroup()
