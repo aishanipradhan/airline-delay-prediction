@@ -44,7 +44,7 @@ keep_cols <- c(
 )
 
 flights <- flights %>%
-  select(all_of(keep_cols))
+  dplyr::select(dplyr::all_of(keep_cols))
 ```
 
 ## Preprocessing
@@ -81,6 +81,10 @@ str(flights)
 
 ```{r}
 flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME)
+
+# Time-based features
+flights <- flights %>%
   mutate(
     dep_hour = floor(CRS_DEP_TIME / 100),
 
@@ -91,61 +95,87 @@ flights <- flights %>%
       TRUE ~ "Night"
     ),
 
-    day_type = if_else(as.numeric(as.character(DAY_OF_WEEK)) %in% c(1, 7),
-                       "Weekend", "Weekday")
+    day_type = if_else(
+      as.numeric(as.character(DAY_OF_WEEK)) %in% c(1, 7),
+      "Weekend",
+      "Weekday"
+    )
   )
 
-# Airline-day delay rate using only earlier flights that day
+# Historical carrier day delay rate:
+# only earlier flights that same day for that carrier
 flights <- flights %>%
   arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
   group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
   mutate(
-    carrier_day_delay_rate = lag(cummean(DEP_DEL15), default = 0)
+    carrier_day_delay_rate =
+      lag(cumsum(DEP_DEL15), default = 0) /
+      pmax(row_number() - 1, 1)
+  ) %>%
+  mutate(
+    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
   ) %>%
   ungroup()
 
-# Historical carrier-route delay rate
-route_delay_rates <- flights %>%
+# Historical carrier-route delay rate:
+# all previous flights for this airline-destination pair
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(OP_UNIQUE_CARRIER, DEST) %>%
-  summarise(
-    carrier_route_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
-    .groups = "drop"
-  )
+  mutate(
+    carrier_route_delay_rate =
+      lag(cumsum(DEP_DEL15), default = 0) /
+      pmax(row_number() - 1, 1)
+  ) %>%
+  mutate(
+    carrier_route_delay_rate = if_else(row_number() == 1, 0, carrier_route_delay_rate)
+  ) %>%
+  ungroup()
 
-# FIXXXX left join
-route_delay_rates <- flights %>%
+# Historical carrier-flight-number delay rate:
+# all previous flights with this airline + flight number
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
-  summarise(
-    carrier_route_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
-    .groups = "drop"
-  )
+  mutate(
+    carrier_flight_delay_rate =
+      lag(cumsum(DEP_DEL15), default = 0) /
+      pmax(row_number() - 1, 1)
+  ) %>%
+  mutate(
+    carrier_flight_delay_rate = if_else(row_number() == 1, 0, carrier_flight_delay_rate)
+  ) %>%
+  ungroup()
 
+# Historical destination delay rate:
+# all previous flights to that destination
 flights <- flights %>%
-  left_join(route_delay_rates,
-            by = c("OP_UNIQUE_CARRIER", "DEST"))
-
-# Historical destination delay rate
-dest_delay_rates <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(DEST) %>%
-  summarise(
-    dest_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
-    .groups = "drop"
-  )
+  mutate(
+    dest_delay_rate =
+      lag(cumsum(DEP_DEL15), default = 0) /
+      pmax(row_number() - 1, 1)
+  ) %>%
+  mutate(
+    dest_delay_rate = if_else(row_number() == 1, 0, dest_delay_rate)
+  ) %>%
+  ungroup()
 
+# Historical carrier-month delay rate:
+# all previous flights in that carrier-month combination
 flights <- flights %>%
-  left_join(dest_delay_rates, by = "DEST")
-
-# Airline-month average delay rate
-carrier_month_rates <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME) %>%
   group_by(OP_UNIQUE_CARRIER, MONTH) %>%
-  summarise(
-    carrier_month_delay_rate = mean(DEP_DEL15, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-flights <- flights %>%
-  left_join(carrier_month_rates,
-            by = c("OP_UNIQUE_CARRIER", "MONTH"))
+  mutate(
+    carrier_month_delay_rate =
+      lag(cumsum(DEP_DEL15), default = 0) /
+      pmax(row_number() - 1, 1)
+  ) %>%
+  mutate(
+    carrier_month_delay_rate = if_else(row_number() == 1, 0, carrier_month_delay_rate)
+  ) %>%
+  ungroup()
 ```
 
 ```{r}
