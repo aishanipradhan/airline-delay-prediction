@@ -247,7 +247,7 @@ test_data <- bind_rows(
 
 ## Logistic Regression with Ridge - aishani
 
-```{r}
+```{r, eval = FALSE}
 logit_model <- glm(
   DEP_DEL15 ~ . - YEAR,
   data = train_data,
