@@ -10,24 +10,164 @@ editor: visual
 ```{r}
 library(tidyverse)
 library(readr)
+library(dplyr)
+library(slider)
+library(rsample)
 ```
-
-![]()
 
 ```{r}
 # Read data
 flights2023 <- read_csv("data/flights2023.csv")
 flights2024 <- read_csv("data/flights2024.csv")
+flights2025 <- read_csv("data/flights2025_visible.csv")
 
 # Combine
-flights <- bind_rows(flights2023, flights2024)
+flights <- rbind(flights2023, flights2024, flights2025)
 
 # Keep only departing PIT flights if arrivals are included
-# Remove flights with no delay info
+# Remove cancelled and diverted flights
 flights <- flights %>%
-  filter(ORIGIN == "PIT") %>%
-  filter(!is.na(DEP_DEL15))
+  filter(ORIGIN == "PIT",
+         CANCELLED == 0,
+         DIVERTED == 0)
+```
 
+```{r}
+head(flights)
+```
+
+## Feature Engineering
+
+```{r}
+# Quarters redefined
+flights <- flights |>
+  mutate(SEASON = case_when(
+    MONTH %in% c(12, 1, 2) ~ "Winter",
+    MONTH %in% c(3, 4, 5) ~ "Spring",
+    MONTH %in% c(6, 7, 8) ~ "Summer",
+    MONTH %in% c(9, 10, 11) ~ "Fall"
+  ))
+```
+
+```{r}
+# Hours since midnight (time block as numerical because eda showed increase)
+flights <- flights |>
+  mutate(DEP_HOUR = CRS_DEP_TIME %/% 100,
+         DEP_MIN = CRS_DEP_TIME %% 100,
+         DEP_HOURS_SINCE_MIDNIGHT = DEP_HOUR + DEP_MIN / 60)
+```
+
+```{r}
+# Delay rate for all carrier flights
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY > 0), na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Carrier delay rate for that day
+flights <- flights %>%
+  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_day_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1)
+  ) %>%
+  mutate(
+    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
+  ) %>%
+  ungroup()
+
+# Delay rate for all carrier-destination pairs
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, DEST) %>%
+  mutate(
+    carrier_route_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Delay rate for all flights to a given destination
+flights <- flights %>%
+  group_by(DEST) %>%
+  mutate(
+    dest_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# Delay rate for all carrier flights in the same month to capture seasonality
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
+  mutate(
+    carrier_month_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+# for a carrier, for a specific flight number, rate of late aircraft delay
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
+  mutate(
+    flightnum_late_aircraft_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(LATE_AIRCRAFT_DELAY, 0) > 0, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+flights <- flights %>%
+  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    weather_event = as.integer(DEP_DEL15 == 1 & coalesce(WEATHER_DELAY, 0) > 0),
+
+    weather_delay_rate_3hr = slide_dbl(
+      seq_along(CRS_DEP_TIME),
+      .f = ~{
+        current_time <- CRS_DEP_TIME[.x[length(.x)]]
+
+        # Earlier flights within the past 3 hours (300 in HHMM format is not correct,
+        # so convert to minutes)
+        current_min <- (current_time %/% 100) * 60 + current_time %% 100
+
+        prior_idx <- .x[
+          ((CRS_DEP_TIME[.x] %/% 100) * 60 + CRS_DEP_TIME[.x] %% 100) >= current_min - 180 &
+          ((CRS_DEP_TIME[.x] %/% 100) * 60 + CRS_DEP_TIME[.x] %% 100) < current_min
+        ]
+
+        if (length(prior_idx) == 0) {
+          0
+        } else {
+          mean(weather_event[prior_idx], na.rm = TRUE)
+        }
+      },
+      .before = Inf
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r}
+#long weekend
+flights <- flights %>%
+  mutate(
+    weekend_group = case_when(
+      DAY_OF_WEEK %in% c(5, 6, 7, 1) ~ "Fri-Mon",
+      DAY_OF_WEEK %in% c(2, 3, 4) ~ "Tue-Thu"
+    )
+  ) %>%
+  group_by(weekend_group) %>%
+  mutate(
+    long_weekend_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0, na.rm = TRUE)
+  ) %>%
+  ungroup()
 ```
 
 ```{r}
@@ -37,212 +177,87 @@ head(flights)
 ## Filtering
 
 ```{r}
-# Columns to keep
-keep_cols <- c(
-  "YEAR", "MONTH", "DAY_OF_MONTH", "DAY_OF_WEEK", "FL_DATE",
-  "OP_UNIQUE_CARRIER", "TAIL_NUM", "OP_CARRIER_FL_NUM", "DEST", "DEST_STATE_ABR",
-  "CRS_DEP_TIME",
-  "DISTANCE", "DEP_DEL15"
+flights_model <- flights %>%
+  select(
+    YEAR,
+    SEASON,
+    OP_UNIQUE_CARRIER,
+    TAIL_NUM,
+    OP_CARRIER_FL_NUM,
+    DEST,
+    DEST_STATE_ABR,
+    DISTANCE,
+    DEP_HOURS_SINCE_MIDNIGHT,
+    carrier_delay_rate,
+    carrier_day_delay_rate,
+    carrier_route_delay_rate,
+    dest_delay_rate,
+    carrier_month_delay_rate,
+    flightnum_late_aircraft_delay_rate,
+    weather_delay_rate_3hr,
+    long_weekend_delay_rate,
+    DEP_DEL15
+  ) %>%
+  mutate(
+    SEASON = as.factor(SEASON),
+    OP_UNIQUE_CARRIER = as.factor(OP_UNIQUE_CARRIER),
+    TAIL_NUM = as.factor(TAIL_NUM),
+    OP_CARRIER_FL_NUM = as.factor(OP_CARRIER_FL_NUM),
+    DEST = factor(DEST),
+    DEST_STATE_ABR = as.factor(DEST_STATE_ABR),
+    DEP_DEL15 = as.factor(DEP_DEL15)
+  )
+```
+
+## Train Test Split
+
+```{r}
+# Stratified split within each year, using DEP_DEL15
+split_2023 <- initial_split(
+  filter(flights_model, YEAR == 2023),
+  prop = 0.8,
+  strata = DEP_DEL15
 )
 
-flights <- flights %>%
-  dplyr::select(dplyr::all_of(keep_cols))
+split_2024 <- initial_split(
+  filter(flights_model, YEAR == 2024),
+  prop = 0.8,
+  strata = DEP_DEL15
+)
+
+split_2025 <- initial_split(
+  filter(flights_model, YEAR == 2025),
+  prop = 0.8,
+  strata = DEP_DEL15
+)
+
+# Combine the train and test sets from each year
+train_data <- bind_rows(
+  training(split_2023),
+  training(split_2024),
+  training(split_2025)
+)
+
+test_data <- bind_rows(
+  testing(split_2023),
+  testing(split_2024),
+  testing(split_2025)
+)
 ```
 
-## Preprocessing
+## Logistic Regression with Ridge - aishani
 
 ```{r}
-str(flights)
-```
-
-```{r}
-# Corrected data types
-
-flights <- flights %>%
-  mutate(
-    FL_DATE = parse_date_time(FL_DATE, orders = "mdY IMS p"),
-    FL_DATE = as.Date(FL_DATE),
-
-    YEAR = as.factor(YEAR),
-    MONTH = as.factor(MONTH),
-    DAY_OF_WEEK = as.factor(DAY_OF_WEEK),
-
-    OP_UNIQUE_CARRIER = as.factor(OP_UNIQUE_CARRIER),
-    DEST = as.factor(DEST),
-    DEST_STATE_ABR = as.factor(DEST_STATE_ABR),
-
-    #DEP_DEL15 = as.factor(DEP_DEL15)
-  )
-```
-
-```{r}
-str(flights)
-```
-
-## EDA+Feature Engineering
-
-```{r, eval = FALSE}
-flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME)
-
-# Time-based features
-flights <- flights %>%
-  mutate(
-    dep_hour = floor(CRS_DEP_TIME / 100),
-
-    time_of_day = case_when(
-      dep_hour >= 5  & dep_hour < 12 ~ "Morning",
-      dep_hour >= 12 & dep_hour < 17 ~ "Afternoon",
-      dep_hour >= 17 & dep_hour < 21 ~ "Evening",
-      TRUE ~ "Night"
-    ),
-
-    day_type = if_else(
-      as.numeric(as.character(DAY_OF_WEEK)) %in% c(1, 7),
-      "Weekend",
-      "Weekday"
-    )
-  )
-
-# Historical carrier day delay rate:
-# only earlier flights that same day for that carrier
-flights <- flights %>%
-  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
-  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
-  mutate(
-    carrier_day_delay_rate =
-      lag(cumsum(DEP_DEL15), default = 0) /
-      pmax(row_number() - 1, 1)
-  ) %>%
-  mutate(
-    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
-  ) %>%
-  ungroup()
-
-# Historical carrier-route delay rate:
-# all previous flights for this airline-destination pair
-flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
-  group_by(OP_UNIQUE_CARRIER, DEST) %>%
-  mutate(
-    carrier_route_delay_rate =
-      lag(cumsum(DEP_DEL15), default = 0) /
-      pmax(row_number() - 1, 1)
-  ) %>%
-  mutate(
-    carrier_route_delay_rate = if_else(row_number() == 1, 0, carrier_route_delay_rate)
-  ) %>%
-  ungroup()
-
-# Historical carrier-flight-number delay rate:
-# all previous flights with this airline + flight number
-flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
-  group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
-  mutate(
-    carrier_flight_delay_rate =
-      lag(cumsum(DEP_DEL15), default = 0) /
-      pmax(row_number() - 1, 1)
-  ) %>%
-  mutate(
-    carrier_flight_delay_rate = if_else(row_number() == 1, 0, carrier_flight_delay_rate)
-  ) %>%
-  ungroup()
-
-# Historical destination delay rate:
-# all previous flights to that destination
-flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
-  group_by(DEST) %>%
-  mutate(
-    dest_delay_rate =
-      lag(cumsum(DEP_DEL15), default = 0) /
-      pmax(row_number() - 1, 1)
-  ) %>%
-  mutate(
-    dest_delay_rate = if_else(row_number() == 1, 0, dest_delay_rate)
-  ) %>%
-  ungroup()
-
-# Historical carrier-month delay rate:
-# all previous flights in that carrier-month combination
-flights <- flights %>%
-  arrange(FL_DATE, CRS_DEP_TIME) %>%
-  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
-  mutate(
-    carrier_month_delay_rate =
-      lag(cumsum(DEP_DEL15), default = 0) /
-      pmax(row_number() - 1, 1)
-  ) %>%
-  mutate(
-    carrier_month_delay_rate = if_else(row_number() == 1, 0, carrier_month_delay_rate)
-  ) %>%
-  ungroup()
-```
-
-```{r}
-# This chunk calculates delay rates in the same groups as above, but over all of 23-24 flights
-
-# I'll keep the carrier day delay rate the same, but add a column with # of flights in the day
-flights <- flights %>%
-  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
-  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
-  mutate(
-    carrier_day_delay_rate =
-      lag(cumsum(DEP_DEL15), default = 0) /
-      pmax(row_number() - 1, 1),
-    n_flights_day = n()
-  ) %>%
-  mutate(
-    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
-  ) %>%
-  ungroup()
-
-# Delay rate for all flights for carrier-destination pair
-# Do not create a # of flights column because we assume the routes are flown somewhat frequently
-flights <- flights %>%
-  group_by(OP_UNIQUE_CARRIER, DEST) %>%
-  mutate(
-    carrier_route_delay_rate =
-      mean(DEP_DEL15)
-  ) %>%
-  ungroup()
-
-# Delay rate for all flights to a given destination
-flights <- flights %>%
-  group_by(DEST) %>%
-  mutate(
-    dest_delay_rate =
-      mean(DEP_DEL15)
-  ) %>%
-  ungroup()
-
-# Delay rate for all carrier flights in the same month to capture seasonality
-flights <- flights %>%
-  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
-  mutate(
-    carrier_month_delay_rate =
-      mean(DEP_DEL15)
-  ) %>%
-  ungroup()
-
-# Delay rate for all carrier flights
-flights <- flights %>%
-  group_by(OP_UNIQUE_CARRIER) %>%
-  mutate(
-    carrier_delay_rate =
-      mean(DEP_DEL15)
-  ) %>%
-  ungroup()
+logit_model <- glm(
+  DEP_DEL15 ~ . - YEAR,
+  data = train_data,
+  family = binomial()
+)
 ```
 
 ```{r}
 head(flights)
 ```
-
-## Logistic Regression - aishani
-
-## Logistic Regression with Ridge - aishani
 
 ## Logistic Regression with Lasso - aishani
 
