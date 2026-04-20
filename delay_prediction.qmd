@@ -237,7 +237,7 @@ test_data <- bind_rows(
 )
 ```
 
-## Logistic Regression with Ridge - aishani
+## Logistic Regression - aishani
 
 ```{r, eval = FALSE}
 logit_model <- glm(
@@ -248,7 +248,35 @@ logit_model <- glm(
 ```
 
 ```{r}
-head(flights)
+predictions_2025 <- predict(
+  logit_model,
+  newdata = test_data,
+  type = "response"
+)
+```
+
+```{r}
+pred_class <- ifelse(predictions_2025 >= 0.5, 1, 0)
+```
+
+```{r}
+classification_rate <- mean(
+  pred_class == test_data$DEP_DEL15
+)
+
+misclassification_error <- 1 - classification_rate
+
+classification_rate
+misclassification_error
+```
+
+```{r}
+auc_obj <- roc(
+  response = test_data$DEP_DEL15,
+  predictor = predictions_2025
+)
+
+auc(auc_obj)
 ```
 
 ## Logistic Regression with Lasso - aishani
