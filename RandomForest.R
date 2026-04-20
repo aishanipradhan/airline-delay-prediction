@@ -1,9 +1,27 @@
 # First, run all cells in delay_prediction.qmd to load data
 library(ranger)
+library(caret)
 set.seed(123)
+
+# Hyperparameter grid
+grid <- expand.grid(
+  mtry = c(3, 4, 5, 6),
+  splitrule = c("variance"),
+  min.node.size = c(1, 5, 10, 25, 50)
+)
 
 # Fit a model (no regularization)
 rf <- ranger(DEP_DEL15 ~ ., data = flights)
+
+# Fit cross validation on grid
+cv <- train(
+  DEP_DEL15 ~ .,
+  data = flights,
+  method = "ranger",
+  tuneGrid = grid,
+  num.trees = 500,
+  importance = "permutation"
+)
 
 # Test model on visible 2025 flights
 flights2025_visible <- read_csv("data/flights2025_visible.csv") |>
