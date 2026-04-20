@@ -181,10 +181,6 @@ flights_model <- flights %>%
   select(
     YEAR,
     SEASON,
-    OP_UNIQUE_CARRIER,
-    TAIL_NUM,
-    OP_CARRIER_FL_NUM,
-    DEST,
     DEST_STATE_ABR,
     DISTANCE,
     DEP_HOURS_SINCE_MIDNIGHT,
@@ -200,10 +196,6 @@ flights_model <- flights %>%
   ) %>%
   mutate(
     SEASON = as.factor(SEASON),
-    OP_UNIQUE_CARRIER = as.factor(OP_UNIQUE_CARRIER),
-    TAIL_NUM = as.factor(TAIL_NUM),
-    OP_CARRIER_FL_NUM = as.factor(OP_CARRIER_FL_NUM),
-    DEST = factor(DEST),
     DEST_STATE_ABR = as.factor(DEST_STATE_ABR),
     DEP_DEL15 = as.factor(DEP_DEL15)
   )
