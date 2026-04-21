@@ -69,3 +69,11 @@ flights |>
 flights |>
   ggplot(aes(y = OP_CARRIER, x = DEP_DEL15)) +
   geom_bar(stat = "summary", fun = "mean")
+
+# Turnaround time
+flights |>
+  filter(is_first == 0) |>
+  ggplot(aes(x = turnaround_time, y = DEP_DEL15)) +
+  geom_point() +
+  geom_smooth() +
+  xlim(c(0, 2))

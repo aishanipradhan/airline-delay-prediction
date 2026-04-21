@@ -1,12 +1,4 @@
 ---
-title: "Delay Predictions"
-format: pdf
-editor: visual
----
-
-## 
-
----
 title: "Airline Delay Prediction"
 author: "Aishani Pradhan, Avery Wang"
 format: pdf
@@ -31,10 +23,15 @@ flights2024 <- read_csv("data/flights2024.csv")
 flights2025 <- read_csv("data/flights2025_visible.csv")
 
 # Combine
-flights <- rbind(flights2023, flights2024, flights2025)
+flights <- rbind(flights2023, flights2024)
 
 # Keep only departing PIT flights if arrivals are included
 # Remove cancelled and diverted flights
+arrivals <- flights |>
+  filter(DEST == "PIT",
+         CANCELLED == 0,
+         DIVERTED == 0)
+
 flights <- flights %>%
   filter(ORIGIN == "PIT",
          CANCELLED == 0,
@@ -59,7 +56,7 @@ flights <- flights |>
 ```
 
 ```{r}
-# Hours since midnight (time block as numerical because eda showed increase)
+# Hours since midnight (numerical)
 flights <- flights |>
   mutate(DEP_HOUR = CRS_DEP_TIME %/% 100,
          DEP_MIN = CRS_DEP_TIME %% 100,
@@ -71,16 +68,11 @@ flights <- flights |>
 flights <- flights %>%
   arrange(FL_DATE, CRS_DEP_TIME)
 
-# Historical carrier delay rate
+# Historical carrier delay rate (23-24)
 flights <- flights %>%
   group_by(OP_UNIQUE_CARRIER) %>%
   mutate(
-    carrier_delay_rate =
-      lag(
-        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
-        default = 0
-      ) / pmax(row_number() - 1, 1),
-    carrier_delay_rate = if_else(row_number() == 1, 0, carrier_delay_rate)
+    carrier_delay_rate = mean(DEP_DEL15)
   ) %>%
   ungroup()
 
@@ -101,13 +93,7 @@ flights <- flights %>%
 flights <- flights %>%
   group_by(OP_UNIQUE_CARRIER, DEST) %>%
   mutate(
-    carrier_route_delay_rate =
-      lag(
-        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
-        default = 0
-      ) / pmax(row_number() - 1, 1),
-    carrier_route_delay_rate =
-      if_else(row_number() == 1, 0, carrier_route_delay_rate)
+    carrier_route_delay_rate = mean(DEP_DEL15)
   ) %>%
   ungroup()
 
@@ -115,12 +101,7 @@ flights <- flights %>%
 flights <- flights %>%
   group_by(DEST) %>%
   mutate(
-    dest_delay_rate =
-      lag(
-        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
-        default = 0
-      ) / pmax(row_number() - 1, 1),
-    dest_delay_rate = if_else(row_number() == 1, 0, dest_delay_rate)
+    dest_delay_rate = mean(DEP_DEL15)
   ) %>%
   ungroup()
 
@@ -128,13 +109,7 @@ flights <- flights %>%
 flights <- flights %>%
   group_by(OP_UNIQUE_CARRIER, MONTH) %>%
   mutate(
-    carrier_month_delay_rate =
-      lag(
-        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
-        default = 0
-      ) / pmax(row_number() - 1, 1),
-    carrier_month_delay_rate =
-      if_else(row_number() == 1, 0, carrier_month_delay_rate)
+    carrier_month_delay_rate = mean(DEP_DEL15)
   ) %>%
   ungroup()
 
@@ -142,65 +117,75 @@ flights <- flights %>%
 flights <- flights %>%
   group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
   mutate(
-    flightnum_late_aircraft_delay_rate =
-      lag(
-        cumsum(DEP_DEL15 == 1 & coalesce(LATE_AIRCRAFT_DELAY, 0) > 0),
-        default = 0
-      ) / pmax(row_number() - 1, 1),
-    flightnum_late_aircraft_delay_rate =
-      if_else(row_number() == 1, 0, flightnum_late_aircraft_delay_rate)
+    flightnum_late_aircraft_delay_rate = mean(DEP_DEL15)
   ) %>%
   ungroup()
 ```
 
 ```{r}
+# Check for weather events in the past 3 hours
 flights <- flights %>%
-  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
-  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  arrange(FL_DATE, DEP_HOURS_SINCE_MIDNIGHT) %>%
+  group_by(FL_DATE) %>%
   mutate(
     weather_event = as.integer(DEP_DEL15 == 1 & coalesce(WEATHER_DELAY, 0) > 0),
 
-    weather_delay_rate_3hr = slide_dbl(
-      seq_along(CRS_DEP_TIME),
-      .f = ~{
-        current_time <- CRS_DEP_TIME[.x[length(.x)]]
-
-        # Earlier flights within the past 3 hours (300 in HHMM format is not correct,
-        # so convert to minutes)
-        current_min <- (current_time %/% 100) * 60 + current_time %% 100
-
-        prior_idx <- .x[
-          ((CRS_DEP_TIME[.x] %/% 100) * 60 + CRS_DEP_TIME[.x] %% 100) >= current_min - 180 &
-          ((CRS_DEP_TIME[.x] %/% 100) * 60 + CRS_DEP_TIME[.x] %% 100) < current_min
-        ]
-
-        if (length(prior_idx) == 0) {
-          0
-        } else {
-          mean(weather_event[prior_idx], na.rm = TRUE)
-        }
-      },
-      .before = Inf
+    weather_delay_rate_3hr = slide_index_dbl(
+      weather_event,
+      DEP_HOURS_SINCE_MIDNIGHT,
+      ~ mean(head(.x, -1)),   # exclude current flight
+      .before = 3,
+      .complete = FALSE
     )
   ) %>%
   ungroup()
 ```
 
 ```{r}
-#long weekend
+# Indicator for long weekend
 flights <- flights %>%
   mutate(
     weekend_group = case_when(
-      DAY_OF_WEEK %in% c(5, 6, 7, 1) ~ "Fri-Mon",
-      DAY_OF_WEEK %in% c(2, 3, 4) ~ "Tue-Thu"
+      DAY_OF_WEEK %in% c(5, 6, 7, 1) ~ "Long Weekend",
+      DAY_OF_WEEK %in% c(2, 3, 4) ~ "Weekday"
     )
   ) %>%
-  group_by(weekend_group) %>%
-  mutate(
-    long_weekend_delay_rate =
-      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0, na.rm = TRUE)
-  ) %>%
   ungroup()
+```
+
+```{r}
+# Add 3 features: is the flight the first flight of the given tail number in the data, is the arriving flight delayed, what is the turnaround time between actual arrival and scheduled departure
+
+# Format arrival time in the same way
+arrivals <- arrivals |>
+  mutate(ARR_HOUR = ARR_TIME %/% 100,
+         ARR_MIN = ARR_TIME %% 100,
+         ARR_HOURS_SINCE_MIDNIGHT = ARR_HOUR + ARR_MIN / 60)
+
+for (i in 1:nrow(flights)) {
+  print(i)
+  # For loop to do this for every flight
+  flight <- flights[i, ]
+  
+  # Filter for all arrivals of the same tail number and day before the scheduled departure time
+  same_flight_arrival <- arrivals |>
+    filter(ARR_HOURS_SINCE_MIDNIGHT < flight$DEP_HOURS_SINCE_MIDNIGHT,
+           FL_DATE == flight$FL_DATE,
+           TAIL_NUM == flight$TAIL_NUM) |>
+    # Get the latest arrival, if it exists, make sure only 1 flight is there
+    slice_max(ARR_HOURS_SINCE_MIDNIGHT, n = 1, with_ties = F)
+  
+  # Calculate features
+  if (nrow(same_flight_arrival) == 0) {
+    flights[i, "is_first"] = 1
+    flights[i, "is_incoming_delayed"] = 0
+    flights[i, "turnaround_time"] = 0
+  } else {
+    flights[i, "is_first"] = 0
+    flights[i, "is_incoming_delayed"] = same_flight_arrival$ARR_DEL15
+    flights[i, "turnaround_time"] = flight$DEP_HOURS_SINCE_MIDNIGHT - same_flight_arrival$ARR_HOURS_SINCE_MIDNIGHT
+  }
+}
 ```
 
 ```{r}
@@ -210,6 +195,8 @@ head(flights)
 ## Filtering
 
 ```{r}
+write.csv(flights, "data/flights.csv")
+
 flights_model <- flights %>%
   select(
     YEAR,
@@ -224,12 +211,14 @@ flights_model <- flights %>%
     carrier_month_delay_rate,
     flightnum_late_aircraft_delay_rate,
     weather_delay_rate_3hr,
-    long_weekend_delay_rate,
+    is_first,
+    is_incoming_delayed,
+    turnaround_time,
     DEP_DEL15
   ) %>%
   mutate(
-    SEASON = as.factor(SEASON),
-    DEST_STATE_ABR = as.factor(DEST_STATE_ABR),
+    is_first = as.factor(is_first),
+    is_incoming_delayed = as.factor(is_incoming_delayed),
     DEP_DEL15 = as.factor(DEP_DEL15)
   )
 ```
@@ -237,6 +226,7 @@ flights_model <- flights %>%
 ## Train Test Split
 
 ```{r}
+set.seed(123)
 # Stratified split within each year, using DEP_DEL15
 split_2023 <- initial_split(
   filter(flights_model, YEAR == 2023),
@@ -250,23 +240,15 @@ split_2024 <- initial_split(
   strata = DEP_DEL15
 )
 
-split_2025 <- initial_split(
-  filter(flights_model, YEAR == 2025),
-  prop = 0.8,
-  strata = DEP_DEL15
-)
-
 # Combine the train and test sets from each year
 train_data <- bind_rows(
   training(split_2023),
-  training(split_2024),
-  training(split_2025)
+  training(split_2024)
 )
 
 test_data <- bind_rows(
   testing(split_2023),
-  testing(split_2024),
-  testing(split_2025)
+  testing(split_2024)
 )
 ```
 
@@ -274,13 +256,15 @@ test_data <- bind_rows(
 
 ```{r}
 logit_model <- glm(
-  DEP_DEL15 ~ . - YEAR,
+  DEP_DEL15 ~ . - YEAR + is_first:is_incoming_delayed + is_first:turnaround_time,
   data = train_data,
   family = binomial()
 )
 ```
 
 ```{r}
+test_data <- test_data |> filter(DEST_STATE_ABR != "OH")
+
 predictions_2025 <- predict(
   logit_model,
   newdata = test_data,
