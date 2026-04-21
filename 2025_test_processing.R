@@ -177,17 +177,6 @@ for (i in 1:nrow(flights2025)) {
 train_data <- flights
 test_data <- flights2025
 
-# Recode turnaround time for first flight of the day
-train <- train_data %>%
-  mutate(
-    turnaround_time = ifelse(is_first == 1, -999, turnaround_time)
-  )
-
-test_data <- test_data %>%
-  mutate(
-    turnaround_time = ifelse(is_first == 1, -999, turnaround_time)
-  )
-
 train_data <- train_data %>%
   select(
     YEAR,
