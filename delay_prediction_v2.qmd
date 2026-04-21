@@ -1,0 +1,325 @@
+---
+title: "Delay Predictions"
+format: pdf
+editor: visual
+---
+
+## 
+
+---
+title: "Airline Delay Prediction"
+author: "Aishani Pradhan, Avery Wang"
+format: pdf
+editor: visual
+---
+
+## Reading the Data
+
+```{r}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(slider)
+library(rsample)
+library(pROC)
+```
+
+```{r}
+# Read data
+flights2023 <- read_csv("data/flights2023.csv")
+flights2024 <- read_csv("data/flights2024.csv")
+flights2025 <- read_csv("data/flights2025_visible.csv")
+
+# Combine
+flights <- rbind(flights2023, flights2024, flights2025)
+
+# Keep only departing PIT flights if arrivals are included
+# Remove cancelled and diverted flights
+flights <- flights %>%
+  filter(ORIGIN == "PIT",
+         CANCELLED == 0,
+         DIVERTED == 0)
+```
+
+```{r}
+head(flights)
+```
+
+## Feature Engineering
+
+```{r}
+# Quarters redefined
+flights <- flights |>
+  mutate(SEASON = case_when(
+    MONTH %in% c(12, 1, 2) ~ "Winter",
+    MONTH %in% c(3, 4, 5) ~ "Spring",
+    MONTH %in% c(6, 7, 8) ~ "Summer",
+    MONTH %in% c(9, 10, 11) ~ "Fall"
+  ))
+```
+
+```{r}
+# Hours since midnight (time block as numerical because eda showed increase)
+flights <- flights |>
+  mutate(DEP_HOUR = CRS_DEP_TIME %/% 100,
+         DEP_MIN = CRS_DEP_TIME %% 100,
+         DEP_HOURS_SINCE_MIDNIGHT = DEP_HOUR + DEP_MIN / 60)
+```
+
+```{r}
+# Sort once in chronological order
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME)
+
+# Historical carrier delay rate
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    carrier_delay_rate = if_else(row_number() == 1, 0, carrier_delay_rate)
+  ) %>%
+  ungroup()
+
+# Historical carrier delay rate within the same day
+flights <- flights %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_day_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
+  ) %>%
+  ungroup()
+
+# Historical carrier-route delay rate
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, DEST) %>%
+  mutate(
+    carrier_route_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    carrier_route_delay_rate =
+      if_else(row_number() == 1, 0, carrier_route_delay_rate)
+  ) %>%
+  ungroup()
+
+# Historical destination delay rate
+flights <- flights %>%
+  group_by(DEST) %>%
+  mutate(
+    dest_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    dest_delay_rate = if_else(row_number() == 1, 0, dest_delay_rate)
+  ) %>%
+  ungroup()
+
+# Historical carrier-month delay rate
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
+  mutate(
+    carrier_month_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    carrier_month_delay_rate =
+      if_else(row_number() == 1, 0, carrier_month_delay_rate)
+  ) %>%
+  ungroup()
+
+# Historical late-aircraft delay rate for each carrier-flight number pair
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
+  mutate(
+    flightnum_late_aircraft_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(LATE_AIRCRAFT_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    flightnum_late_aircraft_delay_rate =
+      if_else(row_number() == 1, 0, flightnum_late_aircraft_delay_rate)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+flights <- flights %>%
+  arrange(FL_DATE, OP_UNIQUE_CARRIER, CRS_DEP_TIME) %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    weather_event = as.integer(DEP_DEL15 == 1 & coalesce(WEATHER_DELAY, 0) > 0),
+
+    weather_delay_rate_3hr = slide_dbl(
+      seq_along(CRS_DEP_TIME),
+      .f = ~{
+        current_time <- CRS_DEP_TIME[.x[length(.x)]]
+
+        # Earlier flights within the past 3 hours (300 in HHMM format is not correct,
+        # so convert to minutes)
+        current_min <- (current_time %/% 100) * 60 + current_time %% 100
+
+        prior_idx <- .x[
+          ((CRS_DEP_TIME[.x] %/% 100) * 60 + CRS_DEP_TIME[.x] %% 100) >= current_min - 180 &
+          ((CRS_DEP_TIME[.x] %/% 100) * 60 + CRS_DEP_TIME[.x] %% 100) < current_min
+        ]
+
+        if (length(prior_idx) == 0) {
+          0
+        } else {
+          mean(weather_event[prior_idx], na.rm = TRUE)
+        }
+      },
+      .before = Inf
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r}
+#long weekend
+flights <- flights %>%
+  mutate(
+    weekend_group = case_when(
+      DAY_OF_WEEK %in% c(5, 6, 7, 1) ~ "Fri-Mon",
+      DAY_OF_WEEK %in% c(2, 3, 4) ~ "Tue-Thu"
+    )
+  ) %>%
+  group_by(weekend_group) %>%
+  mutate(
+    long_weekend_delay_rate =
+      mean(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+head(flights)
+```
+
+## Filtering
+
+```{r}
+flights_model <- flights %>%
+  select(
+    YEAR,
+    SEASON,
+    DEST_STATE_ABR,
+    DISTANCE,
+    DEP_HOURS_SINCE_MIDNIGHT,
+    carrier_delay_rate,
+    carrier_day_delay_rate,
+    carrier_route_delay_rate,
+    dest_delay_rate,
+    carrier_month_delay_rate,
+    flightnum_late_aircraft_delay_rate,
+    weather_delay_rate_3hr,
+    long_weekend_delay_rate,
+    DEP_DEL15
+  ) %>%
+  mutate(
+    SEASON = as.factor(SEASON),
+    DEST_STATE_ABR = as.factor(DEST_STATE_ABR),
+    DEP_DEL15 = as.factor(DEP_DEL15)
+  )
+```
+
+## Train Test Split
+
+```{r}
+# Stratified split within each year, using DEP_DEL15
+split_2023 <- initial_split(
+  filter(flights_model, YEAR == 2023),
+  prop = 0.8,
+  strata = DEP_DEL15
+)
+
+split_2024 <- initial_split(
+  filter(flights_model, YEAR == 2024),
+  prop = 0.8,
+  strata = DEP_DEL15
+)
+
+split_2025 <- initial_split(
+  filter(flights_model, YEAR == 2025),
+  prop = 0.8,
+  strata = DEP_DEL15
+)
+
+# Combine the train and test sets from each year
+train_data <- bind_rows(
+  training(split_2023),
+  training(split_2024),
+  training(split_2025)
+)
+
+test_data <- bind_rows(
+  testing(split_2023),
+  testing(split_2024),
+  testing(split_2025)
+)
+```
+
+## Logistic Regression - aishani
+
+```{r}
+logit_model <- glm(
+  DEP_DEL15 ~ . - YEAR,
+  data = train_data,
+  family = binomial()
+)
+```
+
+```{r}
+predictions_2025 <- predict(
+  logit_model,
+  newdata = test_data,
+  type = "response"
+)
+```
+
+```{r}
+pred_class <- ifelse(predictions_2025 >= 0.5, 1, 0)
+```
+
+```{r}
+classification_rate <- mean(
+  pred_class == test_data$DEP_DEL15
+)
+
+misclassification_error <- 1 - classification_rate
+
+classification_rate
+misclassification_error
+```
+
+```{r}
+auc_obj <- roc(
+  response = test_data$DEP_DEL15,
+  predictor = predictions_2025
+)
+
+auc(auc_obj)
+```
+
+## Logistic Regression with Lasso - aishani
+
+throw everything here
+
+## Random Forest - avery
+
+## Boosting - avery
+
+## SVM? - avery
+
+## Neural Nets – if everything sucks - aishani
