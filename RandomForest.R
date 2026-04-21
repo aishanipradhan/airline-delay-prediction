@@ -1,7 +1,14 @@
 # First, run all cells in delay_prediction.qmd to load data
+flights <- read_csv("data/flights.csv")
 library(ranger)
 library(caret)
 set.seed(123)
+
+# Recode turnaround time for first flight of the day
+flights <- flights |>
+  mutate(turnaround_time = ifelse(is_first == 1,
+                                  -999,
+                                  turnaround_time))
 
 # Hyperparameter grid
 grid <- expand.grid(
