@@ -77,3 +77,7 @@ flights |>
   geom_point() +
   geom_smooth() +
   xlim(c(0, 2))
+
+flights |>
+  ggplot(aes(x = DEP_HOURS_SINCE_MIDNIGHT, y = is.na(weather_delay_rate_3hr))) +
+  geom_point()

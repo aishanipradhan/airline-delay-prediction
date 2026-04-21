@@ -136,7 +136,10 @@ flights <- flights %>%
       ~ mean(head(.x, -1)),   # exclude current flight
       .before = 3,
       .complete = FALSE
-    )
+    ),
+    
+    # If NA, fill with 0s
+    weather_delay_rate_3hr = coalesce(weather_delay_rate_3hr, 0)
   ) %>%
   ungroup()
 ```
