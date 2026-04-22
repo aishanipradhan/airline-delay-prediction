@@ -4,11 +4,28 @@ set.seed(67)
 library(glmnet)
 library(pROC)
 
-# Create model matrices
-x_train <- model.matrix(DEP_DEL15 ~ . - YEAR, data = train_data)[, -1]
+# Formula with interactions
+form <- DEP_DEL15 ~ . - YEAR +
+  is_first:is_incoming_delayed +
+  is_first:turnaround_time
+
+# Training matrix
+x_train <- model.matrix(form, data = train_data)[, -1]
 y_train <- train_data$DEP_DEL15
 
-x_test <- model.matrix(DEP_DEL15 ~ . - YEAR, data = test_data)[, -1]
+# Test matrix
+x_test <- model.matrix(form, data = test_data)[, -1]
+
+# Add missing columns and align order
+missing_cols <- setdiff(colnames(x_train), colnames(x_test))
+
+for (col in missing_cols) {
+  x_test <- cbind(x_test, 0)
+  colnames(x_test)[ncol(x_test)] <- col
+}
+
+# Drop any extra columns and reorder
+x_test <- x_test[, colnames(x_train)]
 
 # Fit ridge logistic regression with cross-validation
 cv_ridge <- cv.glmnet(
