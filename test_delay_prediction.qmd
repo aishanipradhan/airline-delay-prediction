@@ -1,0 +1,570 @@
+---
+title: "Test Delay Predictions"
+format: pdf
+editor: visual
+---
+
+## Reading the Data
+
+```{r}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(slider)
+library(rsample)
+library(pROC)
+library(xgboost)
+```
+
+```{r}
+# Train data
+flights2023 <- read_csv("data/flights2023.csv")
+flights2024 <- read_csv("data/flights2024.csv")
+
+# Combine
+flights <- rbind(flights2023, flights2024)
+
+# Keep only departing PIT flights if arrivals are included
+# Remove cancelled and diverted flights
+arrivals <- flights |>
+  filter(DEST == "PIT",
+         CANCELLED == 0,
+         DIVERTED == 0)
+
+flights <- flights %>%
+  filter(ORIGIN == "PIT",
+         CANCELLED == 0,
+         DIVERTED == 0)
+```
+
+```{r}
+head(flights)
+```
+
+## Feature Engineering
+
+```{r}
+# Quarters redefined
+flights <- flights |>
+  mutate(SEASON = case_when(
+    MONTH %in% c(12, 1, 2) ~ "Winter",
+    MONTH %in% c(3, 4, 5) ~ "Spring",
+    MONTH %in% c(6, 7, 8) ~ "Summer",
+    MONTH %in% c(9, 10, 11) ~ "Fall"
+  ))
+```
+
+```{r}
+# Hours since midnight (numerical)
+flights <- flights |>
+  mutate(DEP_HOUR = CRS_DEP_TIME %/% 100,
+         DEP_MIN = CRS_DEP_TIME %% 100,
+         DEP_HOURS_SINCE_MIDNIGHT = DEP_HOUR + DEP_MIN / 60)
+```
+
+```{r}
+# Sort once in chronological order
+flights <- flights %>%
+  arrange(FL_DATE, CRS_DEP_TIME)
+
+# Historical carrier delay rate (23-24)
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_delay_rate = mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Historical carrier delay rate within the same day
+flights <- flights %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    carrier_day_delay_rate =
+      lag(
+        cumsum(DEP_DEL15 == 1 & coalesce(CARRIER_DELAY, 0) > 0),
+        default = 0
+      ) / pmax(row_number() - 1, 1),
+    carrier_day_delay_rate = if_else(row_number() == 1, 0, carrier_day_delay_rate)
+  ) %>%
+  ungroup()
+
+# Historical carrier-route delay rate
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, DEST) %>%
+  mutate(
+    carrier_route_delay_rate = mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Historical destination delay rate
+flights <- flights %>%
+  group_by(DEST) %>%
+  mutate(
+    dest_delay_rate = mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Historical carrier-month delay rate
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, MONTH) %>%
+  mutate(
+    carrier_month_delay_rate = mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+
+# Historical late-aircraft delay rate for each carrier-flight number pair
+flights <- flights %>%
+  group_by(OP_UNIQUE_CARRIER, OP_CARRIER_FL_NUM) %>%
+  mutate(
+    flightnum_late_aircraft_delay_rate = mean(DEP_DEL15)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Check for weather events in the past 3 hours
+flights <- flights %>%
+  arrange(FL_DATE, DEP_HOURS_SINCE_MIDNIGHT) %>%
+  group_by(FL_DATE) %>%
+  mutate(
+    weather_event = as.integer(DEP_DEL15 == 1 & coalesce(WEATHER_DELAY, 0) > 0),
+
+    weather_delay_rate_3hr = slide_index_dbl(
+      weather_event,
+      DEP_HOURS_SINCE_MIDNIGHT,
+      ~ mean(head(.x, -1)),   # exclude current flight
+      .before = 3,
+      .complete = FALSE
+    ),
+    
+    # If NA, fill with 0s
+    weather_delay_rate_3hr = coalesce(weather_delay_rate_3hr, 0)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Indicator for long weekend
+flights <- flights %>%
+  mutate(
+    weekend_group = case_when(
+      DAY_OF_WEEK %in% c(5, 6, 7, 1) ~ "Long Weekend",
+      DAY_OF_WEEK %in% c(2, 3, 4) ~ "Weekday"
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Add 3 features: is the flight the first flight of the given tail number in the data, is the arriving flight delayed, what is the turnaround time between actual arrival and scheduled departure
+
+# Format arrival time in the same way
+arrivals <- arrivals |>
+  mutate(ARR_HOUR = ARR_TIME %/% 100,
+         ARR_MIN = ARR_TIME %% 100,
+         ARR_HOURS_SINCE_MIDNIGHT = ARR_HOUR + ARR_MIN / 60)
+
+for (i in 1:nrow(flights)) {
+  print(i)
+  # For loop to do this for every flight
+  flight <- flights[i, ]
+  
+  # Filter for all arrivals of the same tail number and day before the scheduled departure time
+  same_flight_arrival <- arrivals |>
+    filter(ARR_HOURS_SINCE_MIDNIGHT < flight$DEP_HOURS_SINCE_MIDNIGHT,
+           FL_DATE == flight$FL_DATE,
+           TAIL_NUM == flight$TAIL_NUM) |>
+    # Get the latest arrival, if it exists, make sure only 1 flight is there
+    slice_max(ARR_HOURS_SINCE_MIDNIGHT, n = 1, with_ties = F)
+  
+  # Calculate features
+  if (nrow(same_flight_arrival) == 0) {
+    flights[i, "is_first"] = 1
+    flights[i, "is_incoming_delayed"] = 0
+    flights[i, "turnaround_time"] = 0
+  } else {
+    flights[i, "is_first"] = 0
+    flights[i, "is_incoming_delayed"] = same_flight_arrival$ARR_DEL15
+    flights[i, "turnaround_time"] = flight$DEP_HOURS_SINCE_MIDNIGHT - same_flight_arrival$ARR_HOURS_SINCE_MIDNIGHT
+  }
+}
+```
+
+```{r}
+head(flights)
+```
+
+```{r}
+write.csv(flights, "data/flights_all.csv")
+```
+
+## Test Data
+
+```{r}
+# Read files
+flights2025_visible <- read_csv("data/flights2025_visible.csv") %>%
+  mutate(source = "visible")
+# Before combining visible and guess, add original row number
+flights2025_guess <- read_csv("data/flights2025_guess.csv") %>%
+  mutate(
+    source = "guess",
+    original_order = row_number()
+  )
+
+# Combine so guess flights can use earlier visible flights
+flights2025 <- bind_rows(
+  flights2025_visible,
+  flights2025_guess
+) %>%
+  arrange(FL_DATE, CRS_DEP_TIME)
+
+# Keep PIT departures and arrivals
+arrivals2025 <- flights2025 %>%
+  filter(
+    source == "visible",
+    DEST == "PIT",
+    CANCELLED == 0,
+    DIVERTED == 0
+  )
+
+flights2025 <- flights2025 %>%
+  filter(
+    ORIGIN == "PIT",
+    CANCELLED == 0 | is.na(CANCELLED),
+    DIVERTED == 0 | is.na(DIVERTED)
+  )
+
+# Join lookup tables from 2023-2024 training data
+carrier_lookup <- flights %>%
+  select(OP_UNIQUE_CARRIER, carrier_delay_rate) %>%
+  distinct()
+
+carrier_route_lookup <- flights %>%
+  select(OP_UNIQUE_CARRIER, DEST, carrier_route_delay_rate) %>%
+  distinct()
+
+dest_lookup <- flights %>%
+  select(DEST, dest_delay_rate) %>%
+  distinct()
+
+carrier_month_lookup <- flights %>%
+  select(OP_UNIQUE_CARRIER, MONTH, carrier_month_delay_rate) %>%
+  distinct()
+
+flights2025 <- flights2025 %>%
+  left_join(carrier_lookup, by = "OP_UNIQUE_CARRIER") %>%
+  left_join(
+    carrier_route_lookup,
+    by = c("OP_UNIQUE_CARRIER", "DEST")
+  ) %>%
+  left_join(dest_lookup, by = "DEST") %>%
+  left_join(
+    carrier_month_lookup,
+    by = c("OP_UNIQUE_CARRIER", "MONTH")
+  )
+
+# Handle missing joined values
+flights2025 <- flights2025 %>%
+  filter(DEST != "SDF") %>%
+  mutate(
+    carrier_route_delay_rate = coalesce(
+      carrier_route_delay_rate,
+      carrier_delay_rate
+    )
+  )
+
+# Recalculate 2025-specific features
+flights2025 <- flights2025 %>%
+  mutate(
+    SEASON = case_when(
+      MONTH %in% c(12, 1, 2) ~ "Winter",
+      MONTH %in% c(3, 4, 5) ~ "Spring",
+      MONTH %in% c(6, 7, 8) ~ "Summer",
+      TRUE ~ "Fall"
+    ),
+    DEP_HOUR = CRS_DEP_TIME %/% 100,
+    DEP_MIN = CRS_DEP_TIME %% 100,
+    DEP_HOURS_SINCE_MIDNIGHT = DEP_HOUR + DEP_MIN / 60
+  ) %>%
+  arrange(FL_DATE, CRS_DEP_TIME)
+
+# Carrier delay rate earlier that same day
+# Only visible flights contribute
+flights2025 <- flights2025 %>%
+  group_by(FL_DATE, OP_UNIQUE_CARRIER) %>%
+  mutate(
+    known_carrier_delay = if_else(
+      source == "visible" &
+        coalesce(DEP_DEL15, 0) == 1 &
+        coalesce(CARRIER_DELAY, 0) > 0,
+      1,
+      0
+    ),
+
+    visible_count = lag(
+      cumsum(source == "visible"),
+      default = 0
+    ),
+
+    carrier_day_delay_rate = lag(
+      cumsum(known_carrier_delay),
+      default = 0
+    ) / pmax(visible_count, 1),
+
+    carrier_day_delay_rate = if_else(
+      visible_count == 0,
+      0,
+      carrier_day_delay_rate
+    )
+  ) %>%
+  ungroup()
+
+# Weather delay rate in previous 3 hours
+# Only visible flights contribute
+flights2025 <- flights2025 %>%
+  arrange(FL_DATE, DEP_HOURS_SINCE_MIDNIGHT) %>%
+  group_by(FL_DATE) %>%
+  mutate(
+    weather_event = if_else(
+      source == "visible" &
+        coalesce(DEP_DEL15, 0) == 1 &
+        coalesce(WEATHER_DELAY, 0) > 0,
+      1,
+      0
+    ),
+
+    row_id = row_number(),
+
+    weather_delay_rate_3hr = slide_index_dbl(
+      row_id,
+      DEP_HOURS_SINCE_MIDNIGHT,
+      ~ {
+        idx <- head(.x, -1)
+
+        if (length(idx) == 0) return(0)
+
+        prior_visible <- idx[source[idx] == "visible"]
+
+        if (length(prior_visible) == 0) return(0)
+
+        mean(weather_event[prior_visible])
+      },
+      .before = 3,
+      .complete = FALSE
+    )
+  ) %>%
+  ungroup()
+
+# Weekend feature
+flights2025 <- flights2025 %>%
+  mutate(
+    weekend_group = case_when(
+      DAY_OF_WEEK %in% c(5, 6, 7, 1) ~ "Long Weekend",
+      TRUE ~ "Weekday"
+    )
+  )
+
+# Prepare visible arrivals only
+arrivals2025 <- arrivals2025 %>%
+  mutate(
+    ARR_HOUR = ARR_TIME %/% 100,
+    ARR_MIN = ARR_TIME %% 100,
+    ARR_HOURS_SINCE_MIDNIGHT = ARR_HOUR + ARR_MIN / 60
+  )
+
+# Incoming-flight features
+flights2025$is_first <- 0
+flights2025$is_incoming_delayed <- 0
+flights2025$turnaround_time <- 0
+
+for (i in 1:nrow(flights2025)) {
+
+  flight <- flights2025[i, ]
+
+  same_flight_arrival <- arrivals2025 %>%
+    filter(
+      FL_DATE == flight$FL_DATE,
+      TAIL_NUM == flight$TAIL_NUM,
+      ARR_HOURS_SINCE_MIDNIGHT < flight$DEP_HOURS_SINCE_MIDNIGHT
+    ) %>%
+    slice_max(
+      ARR_HOURS_SINCE_MIDNIGHT,
+      n = 1,
+      with_ties = FALSE
+    )
+
+  if (nrow(same_flight_arrival) == 0) {
+
+    flights2025$is_first[i] <- 1
+    flights2025$is_incoming_delayed[i] <- 0
+    flights2025$turnaround_time[i] <- 0
+
+  } else {
+
+    flights2025$is_first[i] <- 0
+    flights2025$is_incoming_delayed[i] <- same_flight_arrival$ARR_DEL15
+    flights2025$turnaround_time[i] <-
+      flight$DEP_HOURS_SINCE_MIDNIGHT -
+      same_flight_arrival$ARR_HOURS_SINCE_MIDNIGHT
+  }
+}
+```
+
+## Filtering
+
+```{r}
+# Rename datasets
+train_data <- flights
+test_data <- flights2025 %>%
+  filter(source == "guess")
+```
+
+```{r}
+# Select columns for train data
+train_data <- train_data %>%
+  select(
+    YEAR,
+    SEASON,
+    DEST_STATE_ABR,
+    DISTANCE,
+    DEP_HOURS_SINCE_MIDNIGHT,
+    carrier_delay_rate,
+    carrier_day_delay_rate,
+    carrier_route_delay_rate,
+    dest_delay_rate,
+    carrier_month_delay_rate,
+    weather_delay_rate_3hr,
+    is_first,
+    is_incoming_delayed,
+    turnaround_time,
+    DEP_DEL15
+  ) %>%
+  mutate(
+    is_first = as.factor(is_first),
+    is_incoming_delayed = as.factor(is_incoming_delayed),
+    DEP_DEL15 = as.factor(DEP_DEL15)
+  )
+```
+
+```{r}
+# Select columns for test data
+# Keep only guess flights for prediction
+test_data <- flights2025 %>%
+  filter(source == "guess") %>%
+  select(
+    YEAR,
+    SEASON,
+    DEST_STATE_ABR,
+    DISTANCE,
+    DEP_HOURS_SINCE_MIDNIGHT,
+    carrier_delay_rate,
+    carrier_day_delay_rate,
+    carrier_route_delay_rate,
+    dest_delay_rate,
+    carrier_month_delay_rate,
+    weather_delay_rate_3hr,
+    is_first,
+    is_incoming_delayed,
+    turnaround_time
+  ) %>%
+  mutate(
+    is_first = factor(is_first),
+    is_incoming_delayed = factor(is_incoming_delayed)
+  )
+```
+
+```{r}
+# Check order is the same
+all(test_data$original_order == 1:nrow(test_data))
+```
+
+## XGBoost
+
+```{r}
+# Formula with interactions
+form <- DEP_DEL15 ~ . - YEAR +
+  is_first:is_incoming_delayed +
+  is_first:turnaround_time
+```
+
+```{r}
+# Training matrix
+x_train <- model.matrix(form, data = train_data)[, -1]
+y_train <- as.numeric(as.character(train_data$DEP_DEL15))
+
+# Test matrix
+x_test <- model.matrix(
+  ~ .,
+  data = test_data
+)[, -1]
+
+# Add missing columns and align order
+missing_cols <- setdiff(colnames(x_train), colnames(x_test))
+
+for (col in missing_cols) {
+  x_test <- cbind(x_test, 0)
+  colnames(x_test)[ncol(x_test)] <- col
+}
+
+# Drop any extra columns and reorder
+x_test <- x_test[, colnames(x_train)]
+
+# Convert to xgboost matrix format
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+dtest <- xgb.DMatrix(data = x_test)
+```
+
+```{r}
+# Set model parameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 4,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+# Cross-validation to determine best number of rounds
+cv_xgb <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 500,
+  nfold = 5,
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+# Best number of boosting rounds
+best_nrounds <- cv_xgb$early_stop$best_iteration
+```
+
+```{r}
+# Fit final model
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds,
+  verbose = 0
+)
+```
+
+```{r}
+# Predicted probabilities on test set
+delay.guesses <- predict(
+  xgb_model,
+  newdata = dtest
+)
+```
+
+## Creating Submission File
+
+```{r}
+test.acc <- 0.7599
+team.name <- "Alcholics Anonymous"
+```
+
+```{r}
+save(list = c("delay.guesses", "test.acc", "team.name"),
+file = "AlcoholicsAnonymous462final.RData")
+```
