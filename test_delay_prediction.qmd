@@ -561,7 +561,7 @@ delay.guesses <- predict(
 
 ```{r}
 test.acc <- 0.7599
-team.name <- "Alcholics Anonymous"
+team.name <- "Alcoholics Anonymous"
 ```
 
 ```{r}
