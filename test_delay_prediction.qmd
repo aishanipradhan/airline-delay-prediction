@@ -476,6 +476,7 @@ test_data <- flights2025 %>%
 ```{r}
 # Check order is the same
 all(test_data$original_order == 1:nrow(test_data))
+
 ```
 
 ## XGBoost
